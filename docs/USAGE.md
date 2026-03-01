@@ -56,7 +56,7 @@ Please see [`demo_part1.ipynb`](../demo_part1.ipynb) for an example usage of how
 **2. Cross-Lingual Voice Cloning.**
 Please see [`demo_part2.ipynb`](../demo_part2.ipynb) for an example for languages seen or unseen in the MSML training set.
 
-**3. Gradio Demo.**. We provide a minimalist local gradio demo here. We strongly suggest the users to look into `demo_part1.ipynb`, `demo_part2.ipynb` and the [QnA](QA.md) if they run into issues with the gradio demo. Launch a local gradio demo with `python -m openvoice_app --share`.
+**3. Gradio Demo.**. We provide a minimalist local gradio demo here. We strongly suggest the users to look into `demo_part1.ipynb`, `demo_part2.ipynb` and the [QnA](QA.md) if they run into issues with the gradio demo. Launch a local gradio demo with `python -m openvoice --share` (or `openvoice-app --share` after installation).
 
 ### OpenVoice V2
 
