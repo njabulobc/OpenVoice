@@ -41,5 +41,10 @@ setup(name='MyShell-OpenVoice',
             'gradio==3.48.0',
             'langid==1.1.6'
       ],
+      entry_points={
+            'console_scripts': [
+                  'openvoice-app=openvoice.openvoice_app:main',
+            ],
+      },
       zip_safe=False
       )
