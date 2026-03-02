@@ -49,6 +49,20 @@ OpenVoice has been powering the instant voice cloning capability of [myshell.ai]
 ## How to Use
 Please see [usage](docs/USAGE.md) for detailed instructions.
 
+
+## Application Service Layer
+
+The Gradio demo (`openvoice/openvoice_app.py`) now includes an application service layer (`openvoice/service/`) with:
+
+- token/session-based authentication
+- asynchronous synthesis job queue (`queued`/`running`/`succeeded`/`failed`)
+- persistent SQLite storage for jobs, outputs, and telemetry
+- per-user job history panel with downloadable outputs
+- simple abuse guardrails (rate limiting per user)
+- structured JSON logging with request IDs and error telemetry
+
+Job artifacts and service metadata are stored under `outputs/`.
+
 ## Common Issues
 
 Please see [QA](docs/QA.md) for common questions and answers. We will regularly update the question and answer list.
