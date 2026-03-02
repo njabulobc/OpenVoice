@@ -1,275 +1,193 @@
-import os
-import torch
 import argparse
+import os
 import gradio as gr
-from zipfile import ZipFile
 import langid
+import torch
+
 from openvoice import se_extractor
 from openvoice.api import BaseSpeakerTTS, ToneColorConverter
+from openvoice.service import OpenVoiceService
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--share", action='store_true', default=False, help="make link public")
+parser.add_argument("--share", action="store_true", default=False, help="make link public")
 args = parser.parse_args()
 
-en_ckpt_base = 'checkpoints/base_speakers/EN'
-zh_ckpt_base = 'checkpoints/base_speakers/ZH'
-ckpt_converter = 'checkpoints/converter'
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-output_dir = 'outputs'
+en_ckpt_base = "checkpoints/base_speakers/EN"
+zh_ckpt_base = "checkpoints/base_speakers/ZH"
+ckpt_converter = "checkpoints/converter"
+device = "cuda" if torch.cuda.is_available() else "cpu"
+output_dir = "outputs"
 os.makedirs(output_dir, exist_ok=True)
 
 # load models
-en_base_speaker_tts = BaseSpeakerTTS(f'{en_ckpt_base}/config.json', device=device)
-en_base_speaker_tts.load_ckpt(f'{en_ckpt_base}/checkpoint.pth')
-zh_base_speaker_tts = BaseSpeakerTTS(f'{zh_ckpt_base}/config.json', device=device)
-zh_base_speaker_tts.load_ckpt(f'{zh_ckpt_base}/checkpoint.pth')
-tone_color_converter = ToneColorConverter(f'{ckpt_converter}/config.json', device=device)
-tone_color_converter.load_ckpt(f'{ckpt_converter}/checkpoint.pth')
+en_base_speaker_tts = BaseSpeakerTTS(f"{en_ckpt_base}/config.json", device=device)
+en_base_speaker_tts.load_ckpt(f"{en_ckpt_base}/checkpoint.pth")
+zh_base_speaker_tts = BaseSpeakerTTS(f"{zh_ckpt_base}/config.json", device=device)
+zh_base_speaker_tts.load_ckpt(f"{zh_ckpt_base}/checkpoint.pth")
+tone_color_converter = ToneColorConverter(f"{ckpt_converter}/config.json", device=device)
+tone_color_converter.load_ckpt(f"{ckpt_converter}/checkpoint.pth")
 
 # load speaker embeddings
-en_source_default_se = torch.load(f'{en_ckpt_base}/en_default_se.pth').to(device)
-en_source_style_se = torch.load(f'{en_ckpt_base}/en_style_se.pth').to(device)
-zh_source_se = torch.load(f'{zh_ckpt_base}/zh_default_se.pth').to(device)
+en_source_default_se = torch.load(f"{en_ckpt_base}/en_default_se.pth").to(device)
+en_source_style_se = torch.load(f"{en_ckpt_base}/en_style_se.pth").to(device)
+zh_source_se = torch.load(f"{zh_ckpt_base}/zh_default_se.pth").to(device)
 
-# This online demo mainly supports English and Chinese
-supported_languages = ['zh', 'en']
+supported_languages = ["zh", "en"]
+english_styles = ["default", "whispering", "shouting", "excited", "cheerful", "terrified", "angry", "sad", "friendly"]
 
-def predict(prompt, style, audio_file_pth, agree):
-    # initialize a empty info
-    text_hint = ''
-    # agree with the terms
-    if agree == False:
-        text_hint += '[ERROR] Please accept the Terms & Condition!\n'
-        gr.Warning("Please accept the Terms & Condition!")
-        return (
-            text_hint,
-            None,
-            None,
-        )
 
-    # first detect the input language
-    language_predicted = langid.classify(prompt)[0].strip()  
-    print(f"Detected language:{language_predicted}")
-
+def run_synthesis(prompt: str, style: str, audio_file_path: str, save_path: str, request_id: str):
+    language_predicted = langid.classify(prompt)[0].strip()
     if language_predicted not in supported_languages:
-        text_hint += f"[ERROR] The detected language {language_predicted} for your input text is not in our Supported Languages: {supported_languages}\n"
-        gr.Warning(
-            f"The detected language {language_predicted} for your input text is not in our Supported Languages: {supported_languages}"
-        )
+        raise ValueError(f"Detected language {language_predicted} is unsupported")
 
-        return (
-            text_hint,
-            None,
-            None,
-        )
-    
     if language_predicted == "zh":
+        if style != "default":
+            raise ValueError("Chinese synthesis currently supports only 'default' style")
         tts_model = zh_base_speaker_tts
         source_se = zh_source_se
-        language = 'Chinese'
-        if style not in ['default']:
-            text_hint += f"[ERROR] The style {style} is not supported for Chinese, which should be in ['default']\n"
-            gr.Warning(f"The style {style} is not supported for Chinese, which should be in ['default']")
-            return (
-                text_hint,
-                None,
-                None,
-            )
-
+        language = "Chinese"
     else:
+        if style not in english_styles:
+            raise ValueError(f"Style {style} is not supported for English")
         tts_model = en_base_speaker_tts
-        if style == 'default':
-            source_se = en_source_default_se
-        else:
-            source_se = en_source_style_se
-        language = 'English'
-        if style not in ['default', 'whispering', 'shouting', 'excited', 'cheerful', 'terrified', 'angry', 'sad', 'friendly']:
-            text_hint += f"[ERROR] The style {style} is not supported for English, which should be in ['default', 'whispering', 'shouting', 'excited', 'cheerful', 'terrified', 'angry', 'sad', 'friendly']\n"
-            gr.Warning(f"The style {style} is not supported for English, which should be in ['default', 'whispering', 'shouting', 'excited', 'cheerful', 'terrified', 'angry', 'sad', 'friendly']")
-            return (
-                text_hint,
-                None,
-                None,
-            )
+        source_se = en_source_default_se if style == "default" else en_source_style_se
+        language = "English"
 
-    speaker_wav = audio_file_pth
+    target_se, _ = se_extractor.get_se(audio_file_path, tone_color_converter, target_dir="processed", vad=True)
 
-    if len(prompt) < 2:
-        text_hint += f"[ERROR] Please give a longer prompt text \n"
-        gr.Warning("Please give a longer prompt text")
-        return (
-            text_hint,
-            None,
-            None,
-        )
-    if len(prompt) > 200:
-        text_hint += f"[ERROR] Text length limited to 200 characters for this demo, please try shorter text. You can clone our open-source repo and try for your usage \n"
-        gr.Warning(
-            "Text length limited to 200 characters for this demo, please try shorter text. You can clone our open-source repo for your usage"
-        )
-        return (
-            text_hint,
-            None,
-            None,
-        )
-    
-    # note diffusion_conditioning not used on hifigan (default mode), it will be empty but need to pass it to model.inference
-    try:
-        target_se, audio_name = se_extractor.get_se(speaker_wav, tone_color_converter, target_dir='processed', vad=True)
-    except Exception as e:
-        text_hint += f"[ERROR] Get target tone color error {str(e)} \n"
-        gr.Warning(
-            "[ERROR] Get target tone color error {str(e)} \n"
-        )
-        return (
-            text_hint,
-            None,
-            None,
-        )
-
-    src_path = f'{output_dir}/tmp.wav'
+    src_path = f"{output_dir}/tmp_{request_id}.wav"
     tts_model.tts(prompt, src_path, speaker=style, language=language)
 
-    save_path = f'{output_dir}/output.wav'
-    # Run the tone color converter
-    encode_message = "@MyShell"
     tone_color_converter.convert(
-        audio_src_path=src_path, 
-        src_se=source_se, 
-        tgt_se=target_se, 
+        audio_src_path=src_path,
+        src_se=source_se,
+        tgt_se=target_se,
         output_path=save_path,
-        message=encode_message)
-
-    text_hint += f'''Get response successfully \n'''
-
-    return (
-        text_hint,
-        save_path,
-        speaker_wav,
+        message="@MyShell",
     )
 
+    return {"language": language_predicted, "style": style, "reference": audio_file_path}
 
 
-title = "MyShell OpenVoice"
-
-description = """
-We introduce OpenVoice, a versatile instant voice cloning approach that requires only a short audio clip from the reference speaker to replicate their voice and generate speech in multiple languages. OpenVoice enables granular control over voice styles, including emotion, accent, rhythm, pauses, and intonation, in addition to replicating the tone color of the reference speaker. OpenVoice also achieves zero-shot cross-lingual voice cloning for languages not included in the massive-speaker training set.
-"""
-
-markdown_table = """
-<div align="center" style="margin-bottom: 10px;">
-
-|               |               |               |
-| :-----------: | :-----------: | :-----------: | 
-| **OpenSource Repo** | **Project Page** | **Join the Community** |        
-| <div style='text-align: center;'><a style="display:inline-block,align:center" href='https://github.com/myshell-ai/OpenVoice'><img src='https://img.shields.io/github/stars/myshell-ai/OpenVoice?style=social' /></a></div> | [OpenVoice](https://research.myshell.ai/open-voice) | [![Discord](https://img.shields.io/discord/1122227993805336617?color=%239B59B6&label=%20Discord%20)](https://discord.gg/myshell) |
-
-</div>
-"""
-
-markdown_table_v2 = """
-<div align="center" style="margin-bottom: 2px;">
-
-|               |               |               |              |
-| :-----------: | :-----------: | :-----------: | :-----------: | 
-| **OpenSource Repo** | <div style='text-align: center;'><a style="display:inline-block,align:center" href='https://github.com/myshell-ai/OpenVoice'><img src='https://img.shields.io/github/stars/myshell-ai/OpenVoice?style=social' /></a></div> |  **Project Page** |  [OpenVoice](https://research.myshell.ai/open-voice) |     
-
-| | |
-| :-----------: | :-----------: |
-**Join the Community** |   [![Discord](https://img.shields.io/discord/1122227993805336617?color=%239B59B6&label=%20Discord%20)](https://discord.gg/myshell) |
-
-</div>
-"""
-content = """
-<div>
-  <strong>If the generated voice does not sound like the reference voice, please refer to <a href='https://github.com/myshell-ai/OpenVoice/blob/main/docs/QA.md'>this QnA</a>.</strong> <strong>For multi-lingual & cross-lingual examples, please refer to <a href='https://github.com/myshell-ai/OpenVoice/blob/main/demo_part2.ipynb'>this jupyter notebook</a>.</strong>
-  This online demo mainly supports <strong>English</strong>. The <em>default</em> style also supports <strong>Chinese</strong>. But OpenVoice can adapt to any other language as long as a base speaker is provided.
-</div>
-"""
-wrapped_markdown_content = f"<div style='border: 1px solid #000; padding: 10px;'>{content}</div>"
+service = OpenVoiceService(
+    db_path="outputs/openvoice_service.db",
+    output_dir="outputs",
+    synthesize_fn=run_synthesis,
+    max_jobs_per_window=5,
+    rate_window_seconds=60,
+)
 
 
-examples = [
-    [
-        "今天天气真好，我们一起出去吃饭吧。",
-        'default',
-        "resources/demo_speaker1.mp3",
-        True,
-    ],[
-        "This audio is generated by open voice with a half-performance model.",
-        'whispering',
-        "resources/demo_speaker2.mp3",
-        True,
-    ],
-    [
-        "He hoped there would be stew for dinner, turnips and carrots and bruised potatoes and fat mutton pieces to be ladled out in thick, peppered, flour-fattened sauce.",
-        'sad',
-        "resources/demo_speaker0.mp3",
-        True,
-    ],
-]
+def auth_login(username, password):
+    request_id = service.new_request_id()
+    if not username or not password:
+        return "", "Please provide username and password", None
+    try:
+        token = service.register_or_login(username.strip(), password, request_id)
+    except Exception as exc:
+        return "", f"Auth failed: {exc}", None
+    return token, f"Authenticated as {username}", username
 
-with gr.Blocks(analytics_enabled=False) as demo:
 
-    with gr.Row():
-        with gr.Column():
-            with gr.Row():
-                gr.Markdown(
-                    """
-                    ## <img src="https://huggingface.co/spaces/myshell-ai/OpenVoice/raw/main/logo.jpg" height="40"/>
-                    """
-                )
-            with gr.Row():    
-                gr.Markdown(markdown_table_v2)
-            with gr.Row():
-                gr.Markdown(description)
-        with gr.Column():
-            gr.Video('https://github.com/myshell-ai/OpenVoice/assets/40556743/3cba936f-82bf-476c-9e52-09f0f417bb2f', autoplay=True)
-            
-    with gr.Row():
-        gr.HTML(wrapped_markdown_content)
+def submit_job(token, prompt, style, ref_audio):
+    request_id = service.new_request_id()
+    if not ref_audio:
+        return "", "Reference audio is required"
+    try:
+        job_id = service.submit_job(token, prompt, style, ref_audio, request_id)
+        return job_id, f"Job {job_id} queued"
+    except Exception as exc:
+        return "", f"Failed to submit job: {exc}"
+
+
+def refresh_status(token, job_id):
+    if not job_id:
+        return "No job submitted", None
+    try:
+        job = service.get_job(token, job_id)
+    except Exception as exc:
+        return f"Unable to query job: {exc}", None
+
+    if not job:
+        return "Job not found", None
+
+    msg = f"{job['status']} | created={job['created_at']}"
+    if job.get("error_message"):
+        msg += f" | error={job['error_message']}"
+    downloadable = job.get("output_path") if job["status"] == "succeeded" else None
+    return msg, downloadable
+
+
+def history_rows(token):
+    try:
+        jobs = service.list_jobs(token)
+    except Exception as exc:
+        return [["", "", "", f"history unavailable: {exc}"]]
+
+    rows = []
+    for job in jobs:
+        rows.append([job["id"], job["status"], job["created_at"], job.get("output_path") or job.get("error_message") or ""])
+    return rows or [["", "", "", "No jobs yet"]]
+
+
+with gr.Blocks(analytics_enabled=False, title="MyShell OpenVoice Service") as demo:
+    token_state = gr.State("")
+    user_state = gr.State(None)
+    current_job_state = gr.State("")
+
+    gr.Markdown("## MyShell OpenVoice · Authenticated Async Service")
+    gr.Markdown(
+        "Login to create or reuse an account, submit synthesis jobs, poll status, download results, and browse per-user history."
+    )
 
     with gr.Row():
-        with gr.Column():
+        with gr.Column(scale=1):
+            username_gr = gr.Textbox(label="Username")
+            password_gr = gr.Textbox(label="Password", type="password")
+            login_btn = gr.Button("Login / Register")
+            auth_msg_gr = gr.Textbox(label="Auth Status", interactive=False)
+
             input_text_gr = gr.Textbox(
                 label="Text Prompt",
-                info="One or two sentences at a time is better. Up to 200 text characters.",
-                value="He hoped there would be stew for dinner, turnips and carrots and bruised potatoes and fat mutton pieces to be ladled out in thick, peppered, flour-fattened sauce.",
+                info="One or two sentences at a time is better. Up to 200 characters.",
+                value="This is an asynchronous synthesis test.",
             )
-            style_gr = gr.Dropdown(
-                label="Style",
-                info="Select a style of output audio for the synthesised speech. (Chinese only support 'default' now)",
-                choices=['default', 'whispering', 'cheerful', 'terrified', 'angry', 'sad', 'friendly'],
-                max_choices=1,
-                value="default",
-            )
-            ref_gr = gr.Audio(
-                label="Reference Audio",
-                info="Click on the ✎ button to upload your own target speaker audio",
-                type="filepath",
-                value="resources/demo_speaker2.mp3",
-            )
-            tos_gr = gr.Checkbox(
-                label="Agree",
-                value=False,
-                info="I agree to the terms of the cc-by-nc-4.0 license-: https://github.com/myshell-ai/OpenVoice/blob/main/LICENSE",
-            )
+            style_gr = gr.Dropdown(label="Style", choices=english_styles, value="default")
+            ref_gr = gr.Audio(label="Reference Audio", type="filepath", value="resources/demo_speaker2.mp3")
+            submit_btn = gr.Button("Submit Job")
 
-            tts_button = gr.Button("Send", elem_id="send-btn", visible=True)
+        with gr.Column(scale=1):
+            job_id_gr = gr.Textbox(label="Current Job ID", interactive=False)
+            submit_msg_gr = gr.Textbox(label="Submission Status", interactive=False)
+            refresh_btn = gr.Button("Refresh Current Job")
+            job_status_gr = gr.Textbox(label="Job Status", interactive=False)
+            download_file_gr = gr.File(label="Download Output")
+
+    gr.Markdown("### Job History (per authenticated user)")
+    history_btn = gr.Button("Refresh History")
+    history_gr = gr.Dataframe(headers=["job_id", "status", "created_at", "result"], interactive=False)
+
+    login_btn.click(
+        auth_login,
+        inputs=[username_gr, password_gr],
+        outputs=[token_state, auth_msg_gr, user_state],
+    )
+
+    submit_btn.click(
+        submit_job,
+        inputs=[token_state, input_text_gr, style_gr, ref_gr],
+        outputs=[current_job_state, submit_msg_gr],
+    ).then(lambda job_id: job_id, inputs=[current_job_state], outputs=[job_id_gr])
+
+    refresh_btn.click(
+        refresh_status,
+        inputs=[token_state, current_job_state],
+        outputs=[job_status_gr, download_file_gr],
+    )
+
+    history_btn.click(history_rows, inputs=[token_state], outputs=[history_gr])
 
 
-        with gr.Column():
-            out_text_gr = gr.Text(label="Info")
-            audio_gr = gr.Audio(label="Synthesised Audio", autoplay=True)
-            ref_audio_gr = gr.Audio(label="Reference Audio Used")
-
-            gr.Examples(examples,
-                        label="Examples",
-                        inputs=[input_text_gr, style_gr, ref_gr, tos_gr],
-                        outputs=[out_text_gr, audio_gr, ref_audio_gr],
-                        fn=predict,
-                        cache_examples=False,)
-            tts_button.click(predict, [input_text_gr, style_gr, ref_gr, tos_gr], outputs=[out_text_gr, audio_gr, ref_audio_gr])
-
-demo.queue()  
+demo.queue(default_concurrency_limit=16)
 demo.launch(debug=True, show_api=True, share=args.share)
